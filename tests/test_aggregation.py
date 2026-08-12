@@ -7,13 +7,18 @@ _aggregate, which is the core mechanism that fixes the rejection's
 
 import unittest
 
-from tests._bootstrap import OilPriceOracle
+from tests._bootstrap import OilPriceOracle, make_contract
+
+# Shared helper instance used to call former classmethod/staticmethod
+# helpers, which are now plain instance methods (GenVM lint rule E022
+# requires self as the first parameter on every gl.Contract method).
+_helper = make_contract()
 
 
 class TestDomainExtraction(unittest.TestCase):
     def test_basic(self):
         self.assertEqual(
-            OilPriceOracle._extract_domain("https://www.reuters.com/markets/oil"),
+            _helper._extract_domain("https://www.reuters.com/markets/oil"),
             "reuters.com",
         )
 
@@ -23,45 +28,45 @@ class TestDomainExtraction(unittest.TestCase):
             "https://www.reuters.com/a",
             "https://markets.reuters.com/a",
         ]
-        domains = {OilPriceOracle._extract_domain(u) for u in variants}
+        domains = {_helper._extract_domain(u) for u in variants}
         self.assertEqual(domains, {"reuters.com"})
 
     def test_invalid_scheme_returns_empty(self):
-        self.assertEqual(OilPriceOracle._extract_domain("ftp://reuters.com"), "")
+        self.assertEqual(_helper._extract_domain("ftp://reuters.com"), "")
 
     def test_different_publishers_stay_distinct(self):
-        a = OilPriceOracle._extract_domain("https://reuters.com/a")
-        b = OilPriceOracle._extract_domain("https://bloomberg.com/a")
+        a = _helper._extract_domain("https://reuters.com/a")
+        b = _helper._extract_domain("https://bloomberg.com/a")
         self.assertNotEqual(a, b)
 
     def test_port_is_stripped(self):
         self.assertEqual(
-            OilPriceOracle._extract_domain("https://reuters.com:8443/markets/oil"),
+            _helper._extract_domain("https://reuters.com:8443/markets/oil"),
             "reuters.com",
         )
 
     def test_fragment_is_stripped(self):
         self.assertEqual(
-            OilPriceOracle._extract_domain("https://reuters.com/markets/oil#live-price"),
+            _helper._extract_domain("https://reuters.com/markets/oil#live-price"),
             "reuters.com",
         )
 
     def test_query_string_is_stripped(self):
         self.assertEqual(
-            OilPriceOracle._extract_domain("https://reuters.com/markets/oil?symbol=BRENT&refresh=1"),
+            _helper._extract_domain("https://reuters.com/markets/oil?symbol=BRENT&refresh=1"),
             "reuters.com",
         )
 
     def test_multi_part_tld_keeps_distinct_uk_publishers_independent(self):
-        a = OilPriceOracle._extract_domain("https://www.thisismoney.co.uk/oil")
-        b = OilPriceOracle._extract_domain("https://www.cityam.co.uk/oil")
+        a = _helper._extract_domain("https://www.thisismoney.co.uk/oil")
+        b = _helper._extract_domain("https://www.cityam.co.uk/oil")
         self.assertEqual(a, "thisismoney.co.uk")
         self.assertEqual(b, "cityam.co.uk")
         self.assertNotEqual(a, b)
 
     def test_multi_part_tld_merges_own_subdomains(self):
-        a = OilPriceOracle._extract_domain("https://markets.thisismoney.co.uk/oil")
-        b = OilPriceOracle._extract_domain("https://www.thisismoney.co.uk/oil")
+        a = _helper._extract_domain("https://markets.thisismoney.co.uk/oil")
+        b = _helper._extract_domain("https://www.thisismoney.co.uk/oil")
         self.assertEqual(a, b)
         self.assertEqual(a, "thisismoney.co.uk")
 
@@ -84,7 +89,7 @@ class TestReputableAllowlistRegression(unittest.TestCase):
             "https://www.businessinsider.com/oil-prices",
             "https://markets.businessinsider.com/commodities/oil-price",
         ):
-            domain = OilPriceOracle._extract_domain(url)
+            domain = _helper._extract_domain(url)
             self.assertEqual(domain, "businessinsider.com")
             self.assertIn(domain, OilPriceOracle.REPUTABLE_PRICE_DOMAINS)
 
@@ -95,7 +100,7 @@ class TestReputableAllowlistRegression(unittest.TestCase):
         # the way "markets.businessinsider.com" used to be.
         for domain in OilPriceOracle.REPUTABLE_PRICE_DOMAINS:
             url = f"https://{domain}/oil-price"
-            extracted = OilPriceOracle._extract_domain(url)
+            extracted = _helper._extract_domain(url)
             self.assertEqual(
                 extracted,
                 domain,
@@ -107,19 +112,19 @@ class TestReputableAllowlistRegression(unittest.TestCase):
 
 class TestContentClassification(unittest.TestCase):
     def test_ok_content(self):
-        status, usable = OilPriceOracle._classify_content(
+        status, usable = _helper._classify_content(
             "Brent crude oil is currently trading at $73.40 per barrel today. " * 2
         )
         self.assertEqual(status, "ok")
         self.assertTrue(usable)
 
     def test_empty(self):
-        status, usable = OilPriceOracle._classify_content("   ")
+        status, usable = _helper._classify_content("   ")
         self.assertEqual(status, "empty")
         self.assertFalse(usable)
 
     def test_too_short_is_malformed(self):
-        status, usable = OilPriceOracle._classify_content("n/a")
+        status, usable = _helper._classify_content("n/a")
         self.assertEqual(status, "malformed")
         self.assertFalse(usable)
 
@@ -127,26 +132,26 @@ class TestContentClassification(unittest.TestCase):
 class TestParseFixedWord(unittest.TestCase):
     def test_exact_match(self):
         self.assertEqual(
-            OilPriceOracle._parse_fixed_word("Match", OilPriceOracle.INSTRUMENT_WORDS, "Unclear"),
+            _helper._parse_fixed_word("Match", OilPriceOracle.INSTRUMENT_WORDS, "Unclear"),
             "Match",
         )
 
     def test_labeled_line_extracted_with_label(self):
         raw = "INSTRUMENT: Match\nFRESHNESS: Current\nCOMPARISON: Above"
         self.assertEqual(
-            OilPriceOracle._parse_fixed_word(
+            _helper._parse_fixed_word(
                 raw, OilPriceOracle.INSTRUMENT_WORDS, "Unclear", label="INSTRUMENT"
             ),
             "Match",
         )
         self.assertEqual(
-            OilPriceOracle._parse_fixed_word(
+            _helper._parse_fixed_word(
                 raw, OilPriceOracle.FRESHNESS_WORDS, "Unknown", label="FRESHNESS"
             ),
             "Current",
         )
         self.assertEqual(
-            OilPriceOracle._parse_fixed_word(
+            _helper._parse_fixed_word(
                 raw, OilPriceOracle.COMPARISON_WORDS, "Unclear", label="COMPARISON"
             ),
             "Above",
@@ -159,7 +164,7 @@ class TestParseFixedWord(unittest.TestCase):
         # explicitly stripped, they can't be guessed.
         raw = "INSTRUMENT: Match\nFRESHNESS: Current\nCOMPARISON: Above"
         self.assertEqual(
-            OilPriceOracle._parse_fixed_word(raw, OilPriceOracle.INSTRUMENT_WORDS, "Unclear"),
+            _helper._parse_fixed_word(raw, OilPriceOracle.INSTRUMENT_WORDS, "Unclear"),
             "Unclear",
         )
 
@@ -168,7 +173,7 @@ class TestParseFixedWord(unittest.TestCase):
         # INSTRUMENT-vocabulary word must not accidentally cross-match.
         raw = "INSTRUMENT: Match\nFRESHNESS: Current"
         self.assertEqual(
-            OilPriceOracle._parse_fixed_word(
+            _helper._parse_fixed_word(
                 raw, OilPriceOracle.INSTRUMENT_WORDS, "Unclear", label="FRESHNESS"
             ),
             "Unclear",
@@ -176,13 +181,13 @@ class TestParseFixedWord(unittest.TestCase):
 
     def test_default_on_garbage(self):
         self.assertEqual(
-            OilPriceOracle._parse_fixed_word("blah blah", OilPriceOracle.FRESHNESS_WORDS, "Unknown"),
+            _helper._parse_fixed_word("blah blah", OilPriceOracle.FRESHNESS_WORDS, "Unknown"),
             "Unknown",
         )
 
     def test_empty_defaults(self):
         self.assertEqual(
-            OilPriceOracle._parse_fixed_word("", OilPriceOracle.COMPARISON_WORDS, "Unclear"),
+            _helper._parse_fixed_word("", OilPriceOracle.COMPARISON_WORDS, "Unclear"),
             "Unclear",
         )
 
@@ -197,52 +202,52 @@ class TestParsePrice(unittest.TestCase):
     """
 
     def test_integer_price(self):
-        self.assertEqual(OilPriceOracle._parse_price("73"), 73.0)
+        self.assertEqual(_helper._parse_price("73"), 73.0)
 
     def test_decimal_price(self):
-        self.assertEqual(OilPriceOracle._parse_price("73.42"), 73.42)
+        self.assertEqual(_helper._parse_price("73.42"), 73.42)
 
     def test_dollar_prefixed_price(self):
-        self.assertEqual(OilPriceOracle._parse_price("$73.42"), 73.42)
+        self.assertEqual(_helper._parse_price("$73.42"), 73.42)
 
     def test_comma_separated_price(self):
-        self.assertEqual(OilPriceOracle._parse_price("1,234.56"), 1234.56)
+        self.assertEqual(_helper._parse_price("1,234.56"), 1234.56)
 
     def test_negative_price(self):
         # Real oil prices have gone negative historically (WTI, April
         # 2020) - _parse_price must support this, not just assume
         # prices are always positive.
-        self.assertEqual(OilPriceOracle._parse_price("-37.63"), -37.63)
+        self.assertEqual(_helper._parse_price("-37.63"), -37.63)
 
     def test_trailing_unit_text_ignored(self):
-        self.assertEqual(OilPriceOracle._parse_price("80 USD per barrel"), 80.0)
+        self.assertEqual(_helper._parse_price("80 USD per barrel"), 80.0)
 
     def test_malformed_string_returns_none(self):
-        self.assertIsNone(OilPriceOracle._parse_price("banana"))
+        self.assertIsNone(_helper._parse_price("banana"))
 
     def test_empty_input_returns_none(self):
-        self.assertIsNone(OilPriceOracle._parse_price(""))
-        self.assertIsNone(OilPriceOracle._parse_price("   "))
-        self.assertIsNone(OilPriceOracle._parse_price(None))
+        self.assertIsNone(_helper._parse_price(""))
+        self.assertIsNone(_helper._parse_price("   "))
+        self.assertIsNone(_helper._parse_price(None))
 
     def test_ambiguous_two_numbers_returns_none(self):
-        self.assertIsNone(OilPriceOracle._parse_price("$73 or $85"))
+        self.assertIsNone(_helper._parse_price("$73 or $85"))
 
     def test_number_not_at_start_returns_none(self):
-        self.assertIsNone(OilPriceOracle._parse_price("USD 80.00 per barrel"))
+        self.assertIsNone(_helper._parse_price("USD 80.00 per barrel"))
 
     def test_malformed_thousands_grouping_returns_none(self):
-        self.assertIsNone(OilPriceOracle._parse_price("1,23.45"))
-        self.assertIsNone(OilPriceOracle._parse_price("12,3456"))
+        self.assertIsNone(_helper._parse_price("1,23.45"))
+        self.assertIsNone(_helper._parse_price("12,3456"))
 
     def test_bare_decimal_point_returns_none(self):
-        self.assertIsNone(OilPriceOracle._parse_price("."))
-        self.assertIsNone(OilPriceOracle._parse_price(".73"))
+        self.assertIsNone(_helper._parse_price("."))
+        self.assertIsNone(_helper._parse_price(".73"))
 
     def test_literal_unclear_returns_none(self):
         # The model is instructed to answer literally "Unclear" for
         # PRICE when it can't find a usable number.
-        self.assertIsNone(OilPriceOracle._parse_price("Unclear"))
+        self.assertIsNone(_helper._parse_price("Unclear"))
 
     def test_threshold_and_source_price_use_identical_parsing(self):
         # Both call sites (threshold_price validation in
@@ -251,8 +256,8 @@ class TestParsePrice(unittest.TestCase):
         # this test just re-confirms a representative threshold-style
         # string parses the same way a source-style string does.
         self.assertEqual(
-            OilPriceOracle._parse_price("80 USD per barrel"),
-            OilPriceOracle._parse_price("$80"),
+            _helper._parse_price("80 USD per barrel"),
+            _helper._parse_price("$80"),
         )
 
 
@@ -260,17 +265,17 @@ class TestExtractLabeledValue(unittest.TestCase):
     def test_extracts_value_after_label(self):
         raw = "INSTRUMENT: Match\nPRICE: 73.42\nCOMPARISON: Above"
         self.assertEqual(
-            OilPriceOracle._extract_labeled_value(raw, "PRICE"), "73.42"
+            _helper._extract_labeled_value(raw, "PRICE"), "73.42"
         )
 
     def test_missing_label_returns_empty_string(self):
         raw = "INSTRUMENT: Match\nCOMPARISON: Above"
-        self.assertEqual(OilPriceOracle._extract_labeled_value(raw, "PRICE"), "")
+        self.assertEqual(_helper._extract_labeled_value(raw, "PRICE"), "")
 
     def test_case_insensitive_label_matching(self):
         raw = "price: 73.42"
         self.assertEqual(
-            OilPriceOracle._extract_labeled_value(raw, "PRICE"), "73.42"
+            _helper._extract_labeled_value(raw, "PRICE"), "73.42"
         )
 
 
@@ -305,18 +310,18 @@ class TestExtractLabeledValue(unittest.TestCase):
             self._rec("Above", "reuters.com"),
             self._rec("Above", "bloomberg.com"),
         ]
-        self.assertEqual(OilPriceOracle._aggregate(records), "Above")
+        self.assertEqual(_helper._aggregate(records), "Above")
 
     def test_two_independent_below_yields_below(self):
         records = [
             self._rec("Below", "reuters.com"),
             self._rec("Below", "bloomberg.com"),
         ]
-        self.assertEqual(OilPriceOracle._aggregate(records), "Below")
+        self.assertEqual(_helper._aggregate(records), "Below")
 
     def test_single_source_never_enough(self):
         records = [self._rec("Above", "reuters.com")]
-        self.assertEqual(OilPriceOracle._aggregate(records), "Indeterminate")
+        self.assertEqual(_helper._aggregate(records), "Indeterminate")
 
     def test_non_reputable_source_excluded_even_if_agreeing(self):
         # Two sources say "Above", but one isn't on the allowlist -
@@ -325,35 +330,35 @@ class TestExtractLabeledValue(unittest.TestCase):
             self._rec("Above", "reuters.com"),
             self._rec("Above", "some-random-blog.example", reputable=False),
         ]
-        self.assertEqual(OilPriceOracle._aggregate(records), "Indeterminate")
+        self.assertEqual(_helper._aggregate(records), "Indeterminate")
 
     def test_stale_source_excluded_even_if_reputable(self):
         records = [
             self._rec("Above", "reuters.com"),
             self._rec("Above", "bloomberg.com", quality="stale_or_unknown_freshness"),
         ]
-        self.assertEqual(OilPriceOracle._aggregate(records), "Indeterminate")
+        self.assertEqual(_helper._aggregate(records), "Indeterminate")
 
     def test_instrument_mismatch_excluded_even_if_reputable_and_fresh(self):
         records = [
             self._rec("Above", "reuters.com"),
             self._rec("Above", "bloomberg.com", quality="instrument_or_unit_mismatch"),
         ]
-        self.assertEqual(OilPriceOracle._aggregate(records), "Indeterminate")
+        self.assertEqual(_helper._aggregate(records), "Indeterminate")
 
     def test_duplicate_domain_not_counted_twice(self):
         records = [
             self._rec("Above", "reuters.com"),
             self._rec("Above", "reuters.com", dup=True),
         ]
-        self.assertEqual(OilPriceOracle._aggregate(records), "Indeterminate")
+        self.assertEqual(_helper._aggregate(records), "Indeterminate")
 
     def test_conflicting_evidence_yields_indeterminate(self):
         records = [
             self._rec("Above", "reuters.com"),
             self._rec("Below", "bloomberg.com"),
         ]
-        self.assertEqual(OilPriceOracle._aggregate(records), "Indeterminate")
+        self.assertEqual(_helper._aggregate(records), "Indeterminate")
 
     def test_majority_with_dissent_still_resolves(self):
         records = [
@@ -361,14 +366,14 @@ class TestExtractLabeledValue(unittest.TestCase):
             self._rec("Above", "bloomberg.com"),
             self._rec("Below", "wsj.com"),
         ]
-        self.assertEqual(OilPriceOracle._aggregate(records), "Above")
+        self.assertEqual(_helper._aggregate(records), "Above")
 
     def test_equal_requires_same_threshold_as_above_below(self):
         records = [
             self._rec("Equal", "reuters.com"),
             self._rec("Equal", "bloomberg.com"),
         ]
-        self.assertEqual(OilPriceOracle._aggregate(records), "Equal")
+        self.assertEqual(_helper._aggregate(records), "Equal")
 
     def test_failed_fetches_excluded(self):
         records = [
@@ -376,7 +381,7 @@ class TestExtractLabeledValue(unittest.TestCase):
             self._rec("Unclear", "bloomberg.com", fetch_status="inaccessible", quality="instrument_or_unit_mismatch"),
             self._rec("Above", "wsj.com"),
         ]
-        self.assertEqual(OilPriceOracle._aggregate(records), "Indeterminate")
+        self.assertEqual(_helper._aggregate(records), "Indeterminate")
 
 
 if __name__ == "__main__":

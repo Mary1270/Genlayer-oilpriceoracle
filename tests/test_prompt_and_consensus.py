@@ -6,12 +6,17 @@ checked properties of the code, same discipline as TruthBeacon.
 
 import unittest
 
-from tests._bootstrap import OilPriceOracle
+from tests._bootstrap import OilPriceOracle, make_contract
+
+# Shared helper instance used to call former classmethod/staticmethod
+# helpers, which are now plain instance methods (GenVM lint rule E022
+# requires self as the first parameter on every gl.Contract method).
+_helper = make_contract()
 
 
 class TestPromptGuardrails(unittest.TestCase):
     def setUp(self):
-        self.prompt = OilPriceOracle._build_prompt(
+        self.prompt = _helper._build_prompt(
             "Brent crude oil", "80 USD per barrel", "Example source content"
         )
 
