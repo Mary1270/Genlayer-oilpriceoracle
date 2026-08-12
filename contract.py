@@ -253,8 +253,7 @@ class OilPriceOracle(gl.Contract):
     # (no gl.* calls here - safe to reason about / unit test in isolation)
     # ======================================================================
 
-    @classmethod
-    def _extract_domain(cls, url: str) -> str:
+    def _extract_domain(self, url: str) -> str:
         """
         Extract an approximate REGISTRABLE domain from a URL (e.g.
         "www.reuters.com" and "reuters.com" both become
@@ -263,7 +262,7 @@ class OilPriceOracle(gl.Contract):
         an overly long URL - both treated as invalid/inaccessible.
         """
         u = url.strip().lower()
-        if len(u) > cls.MAX_URL_CHARS:
+        if len(u) > self.MAX_URL_CHARS:
             return ""
 
         scheme_ok = False
@@ -298,10 +297,9 @@ class OilPriceOracle(gl.Contract):
         if not u:
             return ""
 
-        return cls._registrable_domain(u)
+        return self._registrable_domain(u)
 
-    @classmethod
-    def _registrable_domain(cls, host: str) -> str:
+    def _registrable_domain(self, host: str) -> str:
         """Reduce a hostname to an approximate registrable domain. See
         contract docstring / KNOWN_MULTI_PART_SUFFIXES for the exact,
         deliberate PSL-free approximation used (same as TruthBeacon)."""
@@ -311,12 +309,11 @@ class OilPriceOracle(gl.Contract):
         if all(label.isdigit() for label in labels):
             return host
         last_two = ".".join(labels[-2:])
-        if last_two in cls.KNOWN_MULTI_PART_SUFFIXES:
+        if last_two in self.KNOWN_MULTI_PART_SUFFIXES:
             return ".".join(labels[-3:])
         return last_two
 
-    @classmethod
-    def _annotate_sources(cls, source_urls):
+    def _annotate_sources(self, source_urls):
         """
         Deterministically annotate each candidate source with
         provenance metadata BEFORE any network access: domain,
@@ -327,7 +324,7 @@ class OilPriceOracle(gl.Contract):
         seen_domains = set()
         annotated = []
         for raw_url in source_urls:
-            domain = cls._extract_domain(raw_url)
+            domain = self._extract_domain(raw_url)
             valid_scheme = domain != ""
             is_duplicate = valid_scheme and domain in seen_domains
             if valid_scheme and not is_duplicate:
@@ -338,13 +335,12 @@ class OilPriceOracle(gl.Contract):
                     "domain": domain,
                     "valid_scheme": valid_scheme,
                     "is_duplicate_domain": is_duplicate,
-                    "is_reputable": domain in cls.REPUTABLE_PRICE_DOMAINS,
+                    "is_reputable": domain in self.REPUTABLE_PRICE_DOMAINS,
                 }
             )
         return annotated
 
-    @classmethod
-    def _classify_content(cls, content: str):
+    def _classify_content(self, content: str):
         """Deterministically classify fetched page content as usable,
         empty, or malformed. See contract-level constants for the
         exact thresholds. Same proven heuristic used by TruthBeacon."""
@@ -355,15 +351,14 @@ class OilPriceOracle(gl.Contract):
         if length == 0:
             return "empty", False
         words = stripped.split()
-        if length < cls.MIN_CONTENT_CHARS or len(words) < cls.MIN_CONTENT_WORDS:
+        if length < self.MIN_CONTENT_CHARS or len(words) < self.MIN_CONTENT_WORDS:
             return "malformed", False
         printable = sum(1 for ch in stripped if ch.isprintable())
-        if printable / length < cls.MIN_PRINTABLE_RATIO:
+        if printable / length < self.MIN_PRINTABLE_RATIO:
             return "malformed", False
         return "ok", True
 
-    @classmethod
-    def _parse_fixed_word(cls, raw: str, vocabulary, default: str, label: str = None) -> str:
+    def _parse_fixed_word(self, raw: str, vocabulary, default: str, label: str = None) -> str:
         """
         Deterministically map a raw LLM response to one of the words
         in `vocabulary`, defaulting safely to `default` for anything
@@ -411,8 +406,7 @@ class OilPriceOracle(gl.Contract):
 
         return default
 
-    @classmethod
-    def _extract_labeled_value(cls, raw: str, label: str) -> str:
+    def _extract_labeled_value(self, raw: str, label: str) -> str:
         """
         Scan `raw` for a line starting with "{label}:" (case-
         insensitive) and return the text after the colon, stripped.
@@ -433,8 +427,7 @@ class OilPriceOracle(gl.Contract):
                 return stripped_line[len(label_prefix):].strip()
         return ""
 
-    @classmethod
-    def _parse_price(cls, raw) -> "float | None":
+    def _parse_price(self, raw) -> "float | None":
         """
         Deterministically parse a price-like string into a float, or
         return None if it cannot be parsed unambiguously. Pure
@@ -552,8 +545,7 @@ class OilPriceOracle(gl.Contract):
 
         return -value if negative else value
 
-    @classmethod
-    def _aggregate(cls, records):
+    def _aggregate(self, records):
         """
         Deterministically combine per-source comparison results into
         ONE final verdict. Only sources that are:
@@ -591,18 +583,17 @@ class OilPriceOracle(gl.Contract):
         equal = sum(1 for r in eligible if r["comparison"] == "Equal")
         independent_total = len(eligible)
 
-        if independent_total < cls.MIN_INDEPENDENT_SOURCES:
+        if independent_total < self.MIN_INDEPENDENT_SOURCES:
             return "Indeterminate"
-        if above >= cls.MIN_INDEPENDENT_SOURCES and above > below and above > equal:
+        if above >= self.MIN_INDEPENDENT_SOURCES and above > below and above > equal:
             return "Above"
-        if below >= cls.MIN_INDEPENDENT_SOURCES and below > above and below > equal:
+        if below >= self.MIN_INDEPENDENT_SOURCES and below > above and below > equal:
             return "Below"
-        if equal >= cls.MIN_INDEPENDENT_SOURCES and equal > above and equal > below:
+        if equal >= self.MIN_INDEPENDENT_SOURCES and equal > above and equal > below:
             return "Equal"
         return "Indeterminate"
 
-    @staticmethod
-    def _build_prompt(oil_type: str, threshold_price: str, source_content: str) -> str:
+    def _build_prompt(self, oil_type: str, threshold_price: str, source_content: str) -> str:
         """
         Build a hardened price-extraction prompt.
 
