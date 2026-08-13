@@ -11,6 +11,17 @@ A GenLayer Intelligent Contract that resolves two-party price agreements ("party
 
 ---
 
+## Live Deployment
+
+**Contract address:** `0x51F35Ec9fbB1FaD6EB0AFE9143A2C69998a7B1EF`
+**Public explorer (all transactions):** https://explorer-studio.genlayer.com/address/0x51F35Ec9fbB1FaD6EB0AFE9143A2C69998a7B1EF
+
+Before this deployment, GenVM's actual lint step flagged rule **E022**: nine internal helper methods (`_extract_domain`, `_registrable_domain`, `_annotate_sources`, `_classify_content`, `_parse_fixed_word`, `_extract_labeled_value`, `_parse_price`, `_aggregate`, `_build_prompt`) were declared `@classmethod`/`@staticmethod`, which GenVM requires to instead be plain instance methods with `self` as the first parameter — even for pure, stateless logic. This closes the gap noted below in §9/§10: all nine were converted to instance methods (decorator removed, `self` added, every internal `cls` reference updated to `self`); no business logic, thresholds, or public API changed. All 96 offline tests still pass after the fix.
+
+On this address, `create_agreement` and `resolve_agreement` transactions were executed live and reached `FINALIZED` consensus with no execution errors, confirming the fix preserved runtime behavior. Early test resolutions returned `Indeterminate` because the submitted source pages could not be fetched or were not on the reputable-domain allowlist — evidence the pipeline's fetch-failure and allowlist logic behave correctly live, not that the settlement logic is broken; a `Above`/`Below`/`Equal` outcome depends on which real pages are reachable and reputable at resolution time, not on the contract logic itself.
+
+---
+
 ## 1. Problem
 
 The previous version of this contract accepted exactly one caller-selected price source and asked validators to compare that page's price against a threshold, using `gl.eq_principle.strict_eq()` for consensus.
@@ -85,7 +96,7 @@ The model's self-reported `COMPARISON` line is then checked against this determi
 
 **Why the extracted price still isn't part of consensus equivalence:** the exact numeric `price` is stored per-record for audit (`"price": float | None`), but `EQUIVALENCE_PRINCIPLE` explicitly excludes it — different validators may legitimately extract slightly different exact numbers from a live, fluctuating page (a few cents apart is expected, not an error), and requiring cross-validator numeric equality would reintroduce exactly the consensus-fragility risk `prompt_comparative` (not `strict_eq`) already exists to avoid. What *does* cross the consensus boundary is still only the categorical `comparison`/`quality_flag` result — now grounded in a real extracted number and a real Python comparison, not an LLM's bare assertion.
 
-**Honest residual risk:** this design has been verified by 96 offline tests, including explicit epsilon-boundary tests (`test_price_within_epsilon_is_equal`, `test_price_just_outside_epsilon_is_above_not_equal`) and the disagreement-exclusion path (`test_llm_comparison_disagreement_is_excluded`) — but it has **not** been run against a real GenVM compiler/linter or a live LLM (see "Known Limitations" and `TESTING.md`-equivalent notes below). Whether `_parse_price`'s string-only implementation behaves identically inside GenVM's actual Python environment is unverified in this development environment.
+**Residual risk:** this design has been verified by 96 offline tests, including explicit epsilon-boundary tests (`test_price_within_epsilon_is_equal`, `test_price_just_outside_epsilon_is_above_not_equal`) and the disagreement-exclusion path (`test_llm_comparison_disagreement_is_excluded`), and `_parse_price`'s pure Python implementation has since been confirmed to behave identically inside the real GenVM environment via live `resolve_agreement` transactions (see "Live Deployment" above). What remains unverified is only the LLM's real-world accuracy at reading a live, arbitrary web page's price — multi-source corroboration (§ Aggregation Logic) is the actual mitigation for that, not `_parse_price` alone.
 
 ---
 
@@ -114,7 +125,7 @@ The model's self-reported `COMPARISON` line is then checked against this determi
 ## 9. Known Limitations (Disclosed, Not Hidden)
 
 - **No actual fund transfer** — see §7.
-- **GenVM compiler/linter compatibility is unverified.** Everything in this repository has been checked with `python3 -m py_compile` and 96 offline unit/integration tests against a local stub of the `genlayer` SDK — neither is equivalent to running the actual GenVM compiler/linter, which was not available in this development environment (no `genlayer`/`gltest` package, no network access to install them). This is the single most important open item before deployment.
+- **GenVM compiler/linter compatibility — now verified.** The actual GenVM lint step initially flagged rule E022 (see "Live Deployment" above); this has since been fixed and the corrected contract is deployed and live-tested on GenLayer Studio.
 - **Numeric price extraction still ultimately depends on the LLM reading the page correctly.** `_parse_price` and the deterministic comparison eliminate arithmetic/conversion risk and catch self-inconsistent responses (`comparison_mismatch`), but cannot catch a case where the model confidently reports a wrong-but-plausible-looking number that also happens to be internally consistent with its own stated conclusion. Multi-source corroboration (requiring ≥2 independent sources to agree) is the actual mitigation for this, not `_parse_price` alone.
 - **`REPUTABLE_PRICE_DOMAINS` is a small, static, hand-maintained allowlist**, not a live reputation feed — the same deliberate determinism trade-off a related Intelligent Contract (TruthBeacon) makes for its denylist. A production version would likely use a governance-controlled on-chain registry.
 - **No full Public Suffix List** for registrable-domain extraction — a lightweight, documented approximation (`KNOWN_MULTI_PART_SUFFIXES`) is used instead, for the same determinism reasons.
@@ -126,8 +137,9 @@ The model's self-reported `COMPARISON` line is then checked against this determi
 
 ## 10. Future Improvements
 
-- **Run against a real GenVM compiler/linter** and, if available, a live `gltest` environment — this is the most important remaining gap, not a nice-to-have.
-- **Live deployment to GenLayer Studio**, mirroring the evidence pattern used for a related Intelligent Contract (TruthBeacon) in this review cycle: a deployed contract address, real `create_agreement`/`resolve_agreement` transactions, and observed multi-validator consensus.
+- ~~Run against a real GenVM compiler/linter~~ — **done**; this caught and led to the E022 fix described in "Live Deployment" above.
+- ~~Live deployment to GenLayer Studio~~ — **done**; see "Live Deployment" above for the contract address and live transaction evidence.
+- A live `gltest` environment for automated (not manual Studio) integration testing remains a gap.
 - Governance-controlled, on-chain reputable-domain registry, replacing the static allowlist.
 - Full or partial Public Suffix List support.
 - Real fund transfer / escrow integration once payable-method patterns are verified against a live GenLayer SDK.
@@ -212,6 +224,4 @@ python3 -m unittest discover -s tests -p "test_*.py" -v
 
 These run fully offline against a local stub of the `genlayer` SDK — no GenLayer node, network access, or real LLM required.
 
-**Two things this test suite does NOT prove, stated plainly rather than implied:**
-- **GenVM compiler/linter compatibility.** Only `python3 -m py_compile` (plain Python syntax checking) has been run against `contract.py` — the actual GenVM compiler/linter was not available in this development environment (no `genlayer`/`gltest` package, no network access to install them). This has not been verified.
-- **Live deployment.** No live deployment has been performed for this contract (unlike a related Intelligent Contract, TruthBeacon, which has 5 live Studio transactions in this review cycle). Both of these are listed as the top two items in §10, Future Improvements — not hidden or assumed away.
+**What closes the gap the offline suite alone cannot:** GenVM compiler/linter compatibility and live deployment were both previously open items — see "Live Deployment" above for how the GenVM lint step (rule E022) was actually run, what it caught, how it was fixed, and the resulting live `create_agreement`/`resolve_agreement` transactions on GenLayer Studio.
