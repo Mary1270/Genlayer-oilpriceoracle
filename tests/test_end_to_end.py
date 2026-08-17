@@ -612,6 +612,230 @@ class TestResolveAgreementEndToEnd(unittest.TestCase):
         self.assertEqual(result_below["winner"], "party_b")
 
 
+class TestSourcePolicyCommitmentValidation(unittest.TestCase):
+    """create_agreement-time validation of the optional
+    required_source_domains source-policy commitment - see contract.py
+    and README "Source Policy Commitment"."""
+
+    def test_omitting_required_source_domains_is_backward_compatible(self):
+        c = make_contract()
+        agreement_id = c.create_agreement(
+            "A", "B", "Brent crude oil", "80 USD per barrel", "above", "d"
+        )
+        record = json.loads(c.get_agreement(agreement_id))
+        self.assertEqual(record["required_source_domains"], [])
+
+    def test_rejects_domain_not_on_allowlist(self):
+        c = make_contract()
+        with self.assertRaises(gl.vm.UserError):
+            c.create_agreement(
+                "A", "B", "Brent crude oil", "80 USD per barrel", "above", "d",
+                required_source_domains=["reuters.com", "some-random-blog.example"],
+            )
+
+    def test_rejects_duplicate_required_domain(self):
+        c = make_contract()
+        with self.assertRaises(gl.vm.UserError):
+            c.create_agreement(
+                "A", "B", "Brent crude oil", "80 USD per barrel", "above", "d",
+                required_source_domains=["reuters.com", "reuters.com", "bloomberg.com"],
+            )
+
+    def test_rejects_too_few_required_domains(self):
+        # Fewer than MIN_INDEPENDENT_SOURCES could never satisfy
+        # corroboration even in principle.
+        c = make_contract()
+        with self.assertRaises(gl.vm.UserError):
+            c.create_agreement(
+                "A", "B", "Brent crude oil", "80 USD per barrel", "above", "d",
+                required_source_domains=["reuters.com"],
+            )
+
+    def test_rejects_too_many_required_domains(self):
+        c = make_contract()
+        too_many = [
+            "reuters.com", "bloomberg.com", "wsj.com", "cnbc.com",
+            "investing.com", "oilprice.com", "eia.gov",  # 7 > MAX_SOURCES_SUBMITTED
+        ]
+        with self.assertRaises(gl.vm.UserError):
+            c.create_agreement(
+                "A", "B", "Brent crude oil", "80 USD per barrel", "above", "d",
+                required_source_domains=too_many,
+            )
+
+    def test_accepts_exactly_min_required_domains(self):
+        c = make_contract()
+        agreement_id = c.create_agreement(
+            "A", "B", "Brent crude oil", "80 USD per barrel", "above", "d",
+            required_source_domains=["reuters.com", "bloomberg.com"],
+        )
+        record = json.loads(c.get_agreement(agreement_id))
+        self.assertEqual(record["required_source_domains"], ["bloomberg.com", "reuters.com"])
+
+    def test_accepts_exactly_max_required_domains(self):
+        c = make_contract()
+        exactly_max = [
+            "reuters.com", "bloomberg.com", "wsj.com",
+            "cnbc.com", "investing.com", "oilprice.com",
+        ]
+        self.assertEqual(len(exactly_max), OilPriceOracle.MAX_SOURCES_SUBMITTED)
+        # Must not raise.
+        c.create_agreement(
+            "A", "B", "Brent crude oil", "80 USD per barrel", "above", "d",
+            required_source_domains=exactly_max,
+        )
+
+    def test_required_domains_are_normalized_case_and_whitespace(self):
+        c = make_contract()
+        agreement_id = c.create_agreement(
+            "A", "B", "Brent crude oil", "80 USD per barrel", "above", "d",
+            required_source_domains=["  REUTERS.com ", "Bloomberg.COM"],
+        )
+        record = json.loads(c.get_agreement(agreement_id))
+        self.assertEqual(record["required_source_domains"], ["bloomberg.com", "reuters.com"])
+
+
+class TestSourcePolicyCommitmentEnforcement(unittest.TestCase):
+    """resolve_agreement-time enforcement of a committed source policy."""
+
+    def setUp(self):
+        self.contract = make_contract()
+
+    def _fetch_ok(self, url, mode="text"):
+        return "Brent crude oil is currently trading at $85.20 per barrel today, live data. " * 2
+
+    def _prompt_above(self, p, response_format="text"):
+        return "INSTRUMENT: Match\nFRESHNESS: Current\nPRICE: 85.20\nCOMPARISON: Above"
+
+    def _resolve(self, agreement_id, urls):
+        with patch.object(gl.nondet.web, "render", side_effect=self._fetch_ok), patch.object(
+            gl.nondet, "exec_prompt", side_effect=self._prompt_above
+        ):
+            return json.loads(self.contract.resolve_agreement(agreement_id, urls))
+
+    def test_rejects_resolution_missing_a_required_domain(self):
+        # Cherry-picking prevention: the committed policy requires
+        # reuters.com AND bloomberg.com, but the resolver tries to
+        # substitute a different (still-reputable) domain for one of
+        # them instead of including both as agreed.
+        agreement_id = self.contract.create_agreement(
+            "party_a", "party_b", "Brent crude oil", "80 USD per barrel", "above", "d",
+            required_source_domains=["reuters.com", "bloomberg.com"],
+        )
+        cherry_picked_urls = [
+            "https://reuters.com/markets/oil",
+            "https://oilprice.com/latest",  # substituted in place of bloomberg.com
+            "https://cnbc.com/energy",
+        ]
+        with self.assertRaises(gl.vm.UserError):
+            self._resolve(agreement_id, cherry_picked_urls)
+
+    def test_accepts_resolution_with_exactly_the_committed_domains(self):
+        agreement_id = self.contract.create_agreement(
+            "party_a", "party_b", "Brent crude oil", "80 USD per barrel", "above", "d",
+            required_source_domains=["reuters.com", "bloomberg.com"],
+        )
+        urls = [
+            "https://reuters.com/markets/oil",
+            "https://bloomberg.com/energy/crude",
+            "https://oilprice.com/latest-prices",  # 3rd URL to satisfy MIN_SOURCES_SUBMITTED
+        ]
+        result = self._resolve(agreement_id, urls)
+        self.assertEqual(result["final_verdict"], "Above")
+        self.assertEqual(result["winner"], "party_a")
+
+    def test_accepts_resolution_with_committed_domains_plus_extra_corroboration(self):
+        # Extra reputable domains beyond the committed set are allowed
+        # - the commitment is a floor (must-include), not an exact-
+        # match ceiling.
+        agreement_id = self.contract.create_agreement(
+            "party_a", "party_b", "Brent crude oil", "80 USD per barrel", "above", "d",
+            required_source_domains=["reuters.com", "bloomberg.com"],
+        )
+        urls = [
+            "https://reuters.com/markets/oil",
+            "https://bloomberg.com/energy/crude",
+            "https://wsj.com/markets/energy",  # extra, not required, still allowed
+        ]
+        result = self._resolve(agreement_id, urls)
+        self.assertEqual(result["final_verdict"], "Above")
+        self.assertEqual(result["independent_source_count"], 3)
+
+    def test_rejects_resolution_dropping_all_committed_domains(self):
+        agreement_id = self.contract.create_agreement(
+            "party_a", "party_b", "Brent crude oil", "80 USD per barrel", "above", "d",
+            required_source_domains=["reuters.com", "bloomberg.com"],
+        )
+        urls = [
+            "https://oilprice.com/a",
+            "https://cnbc.com/b",
+            "https://wsj.com/c",
+        ]
+        with self.assertRaises(gl.vm.UserError):
+            self._resolve(agreement_id, urls)
+
+    def test_error_message_names_the_missing_domains(self):
+        agreement_id = self.contract.create_agreement(
+            "party_a", "party_b", "Brent crude oil", "80 USD per barrel", "above", "d",
+            required_source_domains=["reuters.com", "bloomberg.com"],
+        )
+        urls = [
+            "https://oilprice.com/a",
+            "https://cnbc.com/b",
+            "https://wsj.com/c",
+        ]
+        try:
+            self._resolve(agreement_id, urls)
+            self.fail("expected gl.vm.UserError")
+        except gl.vm.UserError as exc:
+            message = str(exc)
+            self.assertIn("bloomberg.com", message)
+            self.assertIn("reuters.com", message)
+
+    def test_agreement_without_committed_policy_still_allows_any_reputable_mix(self):
+        # No required_source_domains -> behavior identical to before
+        # this improvement: any mix of >= MIN_INDEPENDENT_SOURCES
+        # reputable domains is accepted.
+        agreement_id = self.contract.create_agreement(
+            "party_a", "party_b", "Brent crude oil", "80 USD per barrel", "above", "d"
+        )
+        urls = [
+            "https://oilprice.com/a",
+            "https://cnbc.com/b",
+            "https://wsj.com/c",
+        ]
+        result = self._resolve(agreement_id, urls)
+        self.assertEqual(result["final_verdict"], "Above")
+
+    def test_winner_still_cannot_be_influenced_when_policy_is_committed(self):
+        # Same structural guarantee as
+        # test_winner_cannot_be_influenced_by_resolve_agreement_parameters,
+        # re-verified with a committed source policy in play: the
+        # winner still only ever depends on the STORED comparison
+        # direction, never anything resolve_agreement's caller
+        # supplies (including which extra, non-required sources they
+        # choose to add).
+        above_agreement = self.contract.create_agreement(
+            "party_a", "party_b", "Brent crude oil", "80 USD per barrel", "above", "d",
+            required_source_domains=["reuters.com", "bloomberg.com"],
+        )
+        below_agreement = self.contract.create_agreement(
+            "party_a", "party_b", "Brent crude oil", "80 USD per barrel", "below", "d",
+            required_source_domains=["reuters.com", "bloomberg.com"],
+        )
+        urls = [
+            "https://reuters.com/markets/oil",
+            "https://bloomberg.com/energy/crude",
+            "https://oilprice.com/latest-prices",
+        ]
+        result_above = self._resolve(above_agreement, urls)
+        result_below = self._resolve(below_agreement, urls)
+
+        self.assertEqual(result_above["final_verdict"], result_below["final_verdict"])
+        self.assertEqual(result_above["winner"], "party_a")
+        self.assertEqual(result_below["winner"], "party_b")
+
+
 class TestViewMethods(unittest.TestCase):
     def test_get_agreement_unknown_raises(self):
         c = make_contract()
