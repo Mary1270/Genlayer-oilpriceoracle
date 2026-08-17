@@ -735,6 +735,7 @@ class OilPriceOracle(gl.Contract):
         threshold_price: str,
         comparison: str,
         description: str,
+        required_source_domains: list[str] = None,
     ) -> str:
         """
         Create a two-party price agreement. `comparison` must be
@@ -749,6 +750,39 @@ class OilPriceOracle(gl.Contract):
         price consensus produced by resolve_agreement below is not an
         inert stored fact, it deterministically decides who wins this
         agreement.
+
+        `required_source_domains` (optional): a source-policy
+        commitment. If given, it fixes the set of reputable
+        (allowlisted) domains that MUST be present among the
+        `source_urls` later submitted to `resolve_agreement` - the
+        resolver may still add extra reputable domains for further
+        corroboration, and may still choose which specific URL/page on
+        each committed domain to submit, but cannot OMIT any committed
+        domain. This is what closes the "arbitrary resolver can
+        cherry-pick among allowlisted pages" gap: without a
+        commitment, a resolver motivated to favor one party could
+        submit only the subset of allowlisted domains likely to read
+        favorably at resolution time. See `resolve_agreement` and the
+        README's "Source Policy Commitment" section for the full
+        design rationale (including why this was chosen over
+        restricting *who* may call `resolve_agreement`).
+
+        If omitted (or empty/None), no source-policy commitment is
+        made and `resolve_agreement` behaves exactly as before: any
+        submission with >= MIN_INDEPENDENT_SOURCES distinct reputable
+        domains is accepted, fully backward compatible with existing
+        callers of this method.
+
+        Each entry must already be on `REPUTABLE_PRICE_DOMAINS` (a
+        required domain that could never be credited as reputable
+        would silently make the agreement unresolvable forever - same
+        "dead entry" failure mode `test_no_allowlist_entry_is_unreachable`
+        guards against for the allowlist itself, caught here instead
+        at creation time). Between MIN_INDEPENDENT_SOURCES and
+        MAX_SOURCES_SUBMITTED distinct entries are required if the
+        parameter is used at all - fewer could never satisfy
+        corroboration, more could never fit within a single
+        resolve_agreement call's MAX_SOURCES_SUBMITTED cap.
 
         Returns the agreement_id used to resolve/look it up later.
         """
@@ -790,6 +824,57 @@ class OilPriceOracle(gl.Contract):
                 f"(got {threshold_price!r})."
             )
 
+        # ------------------------------------------------------------
+        # Source-policy commitment (optional). See this method's
+        # docstring and the README's "Source Policy Commitment"
+        # section for the full rationale. Validated and normalized
+        # HERE, at creation time, so a mistake (unknown domain,
+        # duplicate, too few/many) fails loudly immediately rather
+        # than silently dooming every future resolve_agreement call.
+        # ------------------------------------------------------------
+        required_domains_normalized = []
+        if required_source_domains:
+            if len(required_source_domains) > self.MAX_SOURCES_SUBMITTED:
+                raise gl.vm.UserError(
+                    f"required_source_domains may contain at most "
+                    f"{self.MAX_SOURCES_SUBMITTED} entries - a single "
+                    f"resolve_agreement call can never submit more "
+                    f"than {self.MAX_SOURCES_SUBMITTED} source_urls "
+                    f"(got {len(required_source_domains)})."
+                )
+            seen_domains = set()
+            for raw_domain in required_source_domains:
+                domain = (raw_domain or "").strip().lower()
+                if not domain:
+                    raise gl.vm.UserError(
+                        "required_source_domains entries must not be empty."
+                    )
+                if domain not in self.REPUTABLE_PRICE_DOMAINS:
+                    raise gl.vm.UserError(
+                        f"required_source_domains entry {domain!r} is "
+                        f"not on the reputable-domain allowlist "
+                        f"(REPUTABLE_PRICE_DOMAINS) - committing an "
+                        f"unreputable or misspelled domain would make "
+                        f"this agreement permanently unresolvable."
+                    )
+                if domain in seen_domains:
+                    raise gl.vm.UserError(
+                        f"required_source_domains contains a duplicate "
+                        f"domain: {domain!r}."
+                    )
+                seen_domains.add(domain)
+                required_domains_normalized.append(domain)
+
+            if len(required_domains_normalized) < self.MIN_INDEPENDENT_SOURCES:
+                raise gl.vm.UserError(
+                    f"required_source_domains must include at least "
+                    f"{self.MIN_INDEPENDENT_SOURCES} distinct reputable "
+                    f"domains - fewer could never satisfy independent "
+                    f"corroboration (got "
+                    f"{len(required_domains_normalized)})."
+                )
+            required_domains_normalized.sort()
+
         agreement_id = str(int(self.agreement_count))
         self.agreements[agreement_id] = json.dumps(
             {
@@ -801,6 +886,7 @@ class OilPriceOracle(gl.Contract):
                 "threshold_price": threshold_price,
                 "comparison": comparison_normalized,
                 "description": description,
+                "required_source_domains": required_domains_normalized,
                 "winner": "unresolved",
                 "final_verdict": None,
                 "resolution_attempts": 0,
@@ -822,6 +908,15 @@ class OilPriceOracle(gl.Contract):
         reputable domains (checked before any fetch, same fail-fast
         philosophy as TruthBeacon) - a submission that could
         mathematically never resolve is rejected up front.
+
+        If this agreement committed a source policy at
+        create_agreement time (`required_source_domains`), every
+        committed domain must ALSO be present among the submitted
+        source_urls, or the attempt is rejected before any fetch -
+        see the "Source-policy commitment enforcement" block below
+        and the README's "Source Policy Commitment" section. This
+        prevents a resolver from cherry-picking only the allowlisted
+        domains likely to read favorably at resolution time.
 
         If the resulting final_verdict is "Equal" or "Indeterminate",
         the agreement remains "open" (winner stays "unresolved") and
@@ -868,7 +963,38 @@ class OilPriceOracle(gl.Contract):
         distinct_reputable_domains = {
             a["domain"] for a in annotated if a["valid_scheme"] and a["is_reputable"]
         }
-        if len(distinct_reputable_domains) < self.MIN_INDEPENDENT_SOURCES:
+
+        # ------------------------------------------------------------
+        # Source-policy commitment enforcement. If a policy was
+        # committed at create_agreement time (required_source_domains
+        # non-empty), it is authoritative: every committed domain
+        # MUST be present among this submission's distinct reputable
+        # domains, or the attempt is rejected outright - a resolver
+        # cannot silently drop an inconvenient, already-agreed-upon
+        # source. Extra reputable domains beyond the committed set are
+        # still allowed (more corroboration is never harmful), so this
+        # is a floor, not an exact-match ceiling. This directly closes
+        # the "arbitrary resolver can cherry-pick among allowlisted
+        # pages" gap: see README "Source Policy Commitment".
+        #
+        # When no policy was committed, behavior is unchanged from
+        # before this improvement: any submission with at least
+        # MIN_INDEPENDENT_SOURCES distinct reputable domains passes.
+        # ------------------------------------------------------------
+        required_domains = set(agreement.get("required_source_domains") or [])
+        if required_domains:
+            missing_domains = required_domains - distinct_reputable_domains
+            if missing_domains:
+                raise gl.vm.UserError(
+                    f"This agreement committed a fixed source policy "
+                    f"at create_agreement time (required_source_domains). "
+                    f"The submitted source_urls are missing required "
+                    f"reputable domain(s): {', '.join(sorted(missing_domains))}. "
+                    f"Every domain committed at creation time must be "
+                    f"present among the submitted sources - a resolver "
+                    f"cannot omit an already-agreed-upon source."
+                )
+        elif len(distinct_reputable_domains) < self.MIN_INDEPENDENT_SOURCES:
             raise gl.vm.UserError(
                 f"At least {self.MIN_INDEPENDENT_SOURCES} distinct, "
                 f"reputable (allowlisted) financial-data domains are "
